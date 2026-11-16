@@ -1,0 +1,22 @@
+[package]
+name = "prosper-gen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies.roxmltree]
+version = "0.21"
+
+[dependencies.asciidoc-parser]
+version = "0.31"
+
+[dependencies.quote]
+version = "1.0"
+
+[dependencies.syn]
+version = "3.0"
+
+[dependencies.proc-macro2]
+version = "1.0"
+
+[dependencies.prettyplease]
+version = "0.3"

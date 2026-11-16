@@ -1,0 +1,12 @@
+[package]
+name = "prosper"
+description = "Vulkan bindings generated from vk.xml"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+resolver = "3"
+members = ["generator"]
+
+[build-dependencies.prosper-gen]
+path = "generator"
