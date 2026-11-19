@@ -1,0 +1,2 @@
+[alias]
+vk-dump = "--quiet --config build.warnings=\"allow\" run -p prosper-gen --example dump --"

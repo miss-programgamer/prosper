@@ -16,13 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	let out = env::var_os("OUT_DIR").unwrap();
 	let dest = Path::new(&out).join("vulkan.rs");
-	let mut generator = VkGenerator::new(File::create(dest)?);
-
-	for (_, r#type) in registry.types {
-		if let VkType::Handle(handle) = r#type {
-			generator.gen_handle(handle);
-		}
-	}
+	let generator = VkGenerator::new(File::create(dest)?, &registry);
+	generator.generate();
 
 	Ok(())
 }

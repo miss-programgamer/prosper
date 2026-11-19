@@ -12,18 +12,26 @@ pub struct VkParser<'a> {
 impl<'a> VkParser<'a> {
 	/// Parses the given `vk.xml` into a registry instance.
 	pub fn parse(document: &'a Document<'a>, api: VkApi) -> Result<VkRegistry<'a>> {
-		let mut parser: VkParser<'a> = VkParser { registry: VkRegistry::new(), api };
+		let mut parser = VkParser { registry: VkRegistry::new(), api };
 
-		let registry_node = document.root().first_element_child().unwrap();
-		for child in registry_node.children().filter(is_noncomment_el) {
+		let registry_el = document.root().first_element_child().unwrap();
+		for child in registry_el.children().filter(is_noncomment_el) {
 			match child.tag_name().name() {
 				"platforms" => parser.parse_platforms(child),
 				"tags" => parser.parse_vendors(child),
 				"types" => parser.parse_types(child),
 				"enums" => parser.parse_enums(child),
+				"commands" => parser.parse_commands(child),
 				"feature" => parser.parse_feature(child),
-				tag => eprintln!("{tag}"),
-			};
+				"extensions" => parser.parse_extensions(child),
+				"formats" => parser.parse_formats(child),
+				"dynamicstates" => {}
+				"spirvextensions" => {}
+				"spirvcapabilities" => {}
+				"sync" => {}
+				"videocodecs" => {}
+				tag => panic!("unknown registry element '{tag}'"),
+			}
 		}
 
 		Ok(parser.registry)
@@ -31,17 +39,19 @@ impl<'a> VkParser<'a> {
 
 	fn parse_platforms(&mut self, element: Node<'a, 'a>) {
 		for child in element.children().filter(Node::is_element) {
-			let name = child.attribute("name").unwrap();
-			self.registry.platforms.insert(name, VkPlatform { name });
+			let platform = VkPlatform { name: child.attribute("name").unwrap() };
+			self.registry.platforms.insert(platform.name, platform);
 		}
 	}
 
 	fn parse_vendors(&mut self, element: Node<'a, 'a>) {
 		for child in element.children().filter(Node::is_element) {
-			let name = child.attribute("name").unwrap();
-			let author = child.attribute("author").unwrap();
-			let contact = child.attribute("contact").unwrap();
-			self.registry.vendors.insert(name, VkVendor { ext: name, author, contact });
+			let vendor = VkVendor {
+				ext: child.attribute("name").unwrap(),
+				author: child.attribute("author").unwrap(),
+				contact: child.attribute("contact").unwrap(),
+			};
+			self.registry.vendors.insert(vendor.ext, vendor);
 		}
 	}
 
@@ -61,7 +71,7 @@ impl<'a> VkParser<'a> {
 					"struct" => self.parse_type_struct(child),
 					"union" => self.parse_type_union(child),
 					"" => self.parse_type_raw(child),
-					category => panic!("unexpected category '{category}'"),
+					category => panic!("unknown category '{category}'"),
 				}
 			};
 
@@ -76,7 +86,7 @@ impl<'a> VkParser<'a> {
 	}
 
 	fn parse_type_bitmask(&mut self, element: Node<'a, 'a>) -> VkType<'a> {
-		VkType::Bitmask(VkBitmask { base: self.parse_type_base(element) })
+		VkType::Bitmask(VkBitmask { base: self.parse_type_base(element), members: OrdMap::new() })
 	}
 
 	fn parse_type_define(&mut self, element: Node<'a, 'a>) -> VkType<'a> {
@@ -84,7 +94,7 @@ impl<'a> VkParser<'a> {
 	}
 
 	fn parse_type_enum(&mut self, element: Node<'a, 'a>) -> VkType<'a> {
-		VkType::Enum(VkEnum { base: self.parse_type_base(element) })
+		VkType::Enum(VkEnum { base: self.parse_type_base(element), members: OrdMap::new() })
 	}
 
 	fn parse_type_funcptr(&mut self, element: Node<'a, 'a>) -> VkType<'a> {
@@ -107,16 +117,25 @@ impl<'a> VkParser<'a> {
 		VkType::Struct(VkStruct {
 			base: self.parse_type_base(element),
 			extends: comma_separated(element.attribute("structextends")),
-			is_result: element.has_attribute("returnedonly"),
-			allow_dup: element.has_attribute("allowduplicate"),
 			members: {
-				let mut members: OrdMap<&'a str, VkMember> = OrdMap::new();
+				let mut members = OrdMap::new();
 				for child in element.children().filter(is_noncomment_el) {
-					let name = get_name_or_name(child).unwrap();
-					members.insert(name, VkMember { name });
+					let member = VkStructMember {
+						name: get_name_or_name(child).unwrap(),
+						r#type: get_type_or_type(child).unwrap(),
+						obsolete: parse_deprecated(child.attribute("deprecated")),
+						featurelink: child.attribute("featurelink"),
+						objecttype: child.attribute("objecttype"),
+						optional: parse_optional(child.attribute("optional")),
+						values: child.attribute("values").map(|v| v.split(",").collect()),
+						extern_sync: parse_member_externsync(child.attribute("externsync")),
+					};
+					members.insert(member.name, member);
 				}
 				members
 			},
+			is_result: element.has_attribute("returnedonly"),
+			allow_dup: element.has_attribute("allowduplicate"),
 		})
 	}
 
@@ -141,28 +160,142 @@ impl<'a> VkParser<'a> {
 			name: get_name_or_name(element).unwrap(),
 			requires: element.attribute("requires"),
 			obsolete: parse_deprecated(element.attribute("deprecated")),
+			owner: None,
 		}
 	}
 
-	fn parse_enums(&mut self, _element: Node<'a, 'a>) {
-		// todo!("implement parse_enums");
+	fn parse_enums(&mut self, element: Node<'a, 'a>) {
+		let name = element.attribute("name").unwrap();
+		match element.attribute("type").unwrap() {
+			"enum" => {
+				let r#enum = match &mut self.registry.types[name] {
+					VkType::Enum(r#enum) => r#enum,
+					_ => panic!("enum {name} not found"),
+				};
+
+				for child in element.children().filter(is_enum_el) {
+					let member = VkEnumMember { name: get_name_or_name(child).unwrap() };
+					r#enum.members.insert(member.name, member);
+				}
+			}
+			"bitmask" => {
+				match &mut self.registry.types[name] {
+					// Bitmask values are allowed to populate enums because it'll be an enum of
+					// that bitmask's possible bit values. Don't think about it too hard.
+					VkType::Enum(r#enum) => {
+						for child in element.children().filter(is_enum_el) {
+							let member = VkEnumMember { name: get_name_or_name(child).unwrap() };
+							r#enum.members.insert(member.name, member);
+						}
+					}
+					VkType::Bitmask(bitmask) => {
+						for child in element.children().filter(is_enum_el) {
+							let member = VkBitmaskMember { name: get_name_or_name(child).unwrap() };
+							bitmask.members.insert(member.name, member);
+						}
+					}
+					_ => panic!("bitmask {name} not found"),
+				};
+			}
+			"constants" => {
+				for child in element.children().filter(is_enum_el) {
+					let member = VkGlobal { name: get_name_or_name(child).unwrap() };
+					self.registry.globals.insert(member.name, member);
+				}
+			}
+			r#type => panic!("unknown enum type '{type}'"),
+		}
+	}
+
+	fn parse_commands(&mut self, element: Node<'a, 'a>) {
+		for child in element.children().filter(is_noncomment_el) {
+			if let Some(alias) = element.attribute("alias") {
+				let name = get_name_or_name(child).unwrap();
+				let command = VkCommandAlias { name, alias, owner: None };
+				self.registry.commands.insert(command.name, command.into());
+			} else {
+				let name = get_name_or_name(child).unwrap();
+				let command = VkCommandConcrete { name, owner: None };
+				self.registry.commands.insert(command.name, command.into());
+			}
+		}
 	}
 
 	fn parse_feature(&mut self, element: Node<'a, 'a>) {
+		let mut requirements: OrdMap<&str, &str> = OrdMap::new();
+		let mut removals: OrdMap<&str, &str> = OrdMap::new();
+		let mut deprecations: OrdMap<&str, &str> = OrdMap::new();
+
+		let feature_name = get_name_or_name(element).unwrap();
+		let owner = Some(VkOwner::Feature(feature_name));
+
+		for child in element.children().filter(is_noncomment_el) {
+			match child.tag_name().name() {
+				"require" => {
+					for child in child.children().filter(is_noncomment_el) {
+						let name = get_name_or_name(child).unwrap();
+						requirements.insert(name, name);
+						match child.tag_name().name() {
+							"command" => self.registry.commands[name].set_owner(owner),
+							"enum" => {}
+							"type" => self.registry.types[name].set_owner(owner),
+							"feature" => {}
+							tag => panic!("unknown requirement '{tag}'"),
+						}
+					}
+				}
+				"remove" => {
+					for child in child.children().filter(is_noncomment_el) {
+						let name = get_name_or_name(child).unwrap();
+						removals.insert(name, name);
+					}
+				}
+				"deprecate" => {
+					for child in child.children().filter(is_noncomment_el) {
+						let name = get_name_or_name(child).unwrap();
+						deprecations.insert(name, name);
+					}
+				}
+				_ => panic!(),
+			}
+		}
+
 		let feature = VkFeature {
 			api: parse_api(element.attribute("api")),
-			name: get_name_or_name(element).unwrap(),
+			name: feature_name,
 			public: element
 				.attribute("apitype")
 				.map(|api| match api {
 					"internal" => false,
 					"public" => true,
-					api => panic!("unexpected api type '{api}'"),
+					api => panic!("unknown api type '{api}'"),
 				})
 				.unwrap_or(false),
+			requirements,
+			removals,
+			deprecations,
 		};
 
 		self.registry.features.insert(feature.name, feature);
+	}
+
+	fn parse_extensions(&mut self, element: Node<'a, 'a>) {
+		for child in element.children().filter(is_noncomment_el) {
+			self.parse_extension(child);
+		}
+	}
+
+	fn parse_extension(&mut self, element: Node<'a, 'a>) {
+		let ext_name = get_name_or_name(element).unwrap();
+		let extension = VkExtension { name: ext_name };
+		self.registry.extensions.insert(extension.name, extension);
+	}
+
+	fn parse_formats(&mut self, element: Node<'a, 'a>) {
+		for child in element.children().filter(is_noncomment_el) {
+			let format = VkFormat { name: get_name_or_name(child).unwrap() };
+			self.registry.formats.insert(format.name, format);
+		}
 	}
 }
 
@@ -198,11 +331,41 @@ fn parse_api(api: Option<&str>) -> VkApi {
 }
 
 /// Parse a deprecation attribute on a type.
-fn parse_deprecated(deprecated: Option<&str>) -> Obsolete {
-	deprecated.map_or(Obsolete::False, |d| match d {
-		"true" => Obsolete::Deprecated,
-		"aliased" => Obsolete::Aliased,
+fn parse_deprecated(deprecated: Option<&str>) -> Option<VkObsolete> {
+	deprecated.map_or(None, |d| match d {
+		"true" => Some(VkObsolete::Deprecated),
+		"aliased" => Some(VkObsolete::Aliased),
+		"unused" => Some(VkObsolete::Unused),
 		dep => panic!("unknown deprecation '{dep}'"),
+	})
+}
+
+///
+fn parse_member_externsync(externsync: Option<&str>) -> bool {
+	externsync.map_or(false, |at| match at {
+		"true" => true,
+		// This isn't supposed to happen, but it does so we handle it. Thanks vk.xml.
+		"maybe" => {
+			eprintln!("encountered 'maybe' while parsing externsync attribute");
+			false
+		}
+		at => panic!("unknown externsync value '{at}'"),
+	})
+}
+
+/// Parse an optional attribute on a member.
+///
+/// Because this can be a comma-separated list of values for each indirection of a pointer, this
+/// returns a vector of booleans. I hate it too.
+fn parse_optional(optional: Option<&str>) -> Vec<bool> {
+	optional.map_or_default(|opt| {
+		opt.split(",")
+			.map(|opt| match opt {
+				"true" => true,
+				"false" => false,
+				opt => panic!("unknown fragment of optional attribute '{opt}'"),
+			})
+			.collect()
 	})
 }
 
@@ -214,6 +377,11 @@ fn is_name_el(node: &Node) -> bool {
 /// Checks whether the given node is a type element.
 fn is_type_el(node: &Node) -> bool {
 	node.is_element() && node.has_tag_name("type")
+}
+
+/// Checks whether the given node is an enum element.
+fn is_enum_el(node: &Node) -> bool {
+	node.is_element() && node.has_tag_name("enum")
 }
 
 /// In their infinite wisdom, the authors of vk.xml used `<comment>` tags rather than proper xml
